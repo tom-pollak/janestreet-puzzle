@@ -14,6 +14,8 @@ pt_path = hf_hub_download(
     filename="model_3_11.pt",
 )
 
+cache = {}  # used wayy later
+
 
 class Model(t.nn.Module):
     def __init__(self):
@@ -48,6 +50,7 @@ cos_alpha = 0.0  # 1e-3
 weight_decay = 0.0  # 1e-3
 batch_size = 100
 max_grad_norm = 1.0
+diversity_weight = 0.1
 
 
 # %%
@@ -73,6 +76,7 @@ def optimize_input(
     steps=1000,
     inp_stddev=1.0,
     close_pbar=True,
+    diversity_weight=0.0,
 ):
     input_layer = model.seq[input_idx]
     if not hasattr(input_layer, "out_features"):  # isinstance(input_layer, t.nn.ReLU):
@@ -113,13 +117,15 @@ def optimize_input(
         optimizer.zero_grad()
         sub_model = model.seq[input_idx : output_idx + 1]
         acts = sub_model(inp)
-        loss = t.nn.functional.mse_loss(acts, target)
+        mse_loss = t.nn.functional.mse_loss(acts, target)
 
-        # zinp = t.nn.functional.normalize(inp, p=2, dim=-1)
-        # bottom_tri = t.tril(t.ones_like(zinp @ zinp.T), diagonal=-1)
-        # cossim = (zinp @ zinp.T) * bottom_tri
-        # cossim_loss = t.nn.functional.mse_loss(cossim, bottom_tri)
+        normalized_inp = t.nn.functional.normalize(inp, p=2, dim=-1)
+        cosine_sim = normalized_inp @ normalized_inp.T
+        mask = t.tril(t.ones_like(cosine_sim), diagonal=-1)
+        # mean cosine similarity between different inputs
+        cossim_loss = (cosine_sim * mask).sum() / (mask.sum() + 1e-8)
 
+        loss = mse_loss + diversity_weight * cossim_loss
 
         loss.backward()
         grad_norm = t.nn.utils.clip_grad_norm_(inp, max_norm=max_grad_norm)
@@ -128,8 +134,9 @@ def optimize_input(
         if i % 250 == 0:
             pbar.set_postfix(
                 loss=loss.item(),
-                grad_norm=grad_norm.item(),
+                mse_loss=mse_loss.item(),
                 cossim_loss=cossim_loss.item(),
+                grad_norm=grad_norm.item(),
             )
 
         if loss < break_loss and i > steps // 10:
@@ -218,6 +225,7 @@ max_lr = 5e-3
 break_loss = 1e-8
 weight_decay = 1e-3
 max_grad_norm = 1.0
+diversity_weight = 1e-8
 
 # %%
 
@@ -228,34 +236,35 @@ batch_size = 100
 target = t.tensor([1.0], requires_grad=True, dtype=t.float32)
 input_idx = start_idxs[0]
 output_idx = final_idx
-out = optimize_input(input_idx, output_idx, target, steps=5000)
+final_output = optimize_input(input_idx, output_idx, target, steps=10000)
 
-final_output = out.mean(dim=0).detach()
+mean_final_output = final_output.mean(dim=0).detach()
 
-plt.bar(range(out.shape[-1]), final_output.cpu().numpy())
+# %%
+plt.bar(range(mean_final_output.shape[-1]), mean_final_output.cpu().numpy())
 plt.title(
-    f"Final layer optimization {model.seq[5439:](final_output).detach().cpu().numpy()}",
+    f"Final layer optimization {model.seq[5439:final_idx+1](mean_final_output).detach().cpu().numpy().item()}",
 )
 plt.show()
 
 # %%
 
-prev_output = final_output
 
-# ok let's focus only on a single example.
-batch_size = 100
+def optimize_layer(prev_output, i, steps):
+    global min_lr, max_lr
 
-for i in tqdm(range(1, len(start_idxs))):
     min_lr = 1e-3
     max_lr = 5e-3
     output_idx = start_idxs[i - 1] - 1  # off the relu
     input_idx = start_idxs[i]  # on the relu
 
     # this gets us to an ok point in input space to start our optimization, so we actually get a gradient.
-    temp_input = optimize_input(input_idx, output_idx, prev_output, steps=5000)
+    temp_input = optimize_input(input_idx, output_idx, prev_output, steps=steps, diversity_weight=diversity_weight)
+
+    temp_model_outp = model.seq[input_idx : final_idx + 1](temp_input)[0].item()
 
     plt.bar(range(temp_input.shape[-1]), temp_input[0].cpu().numpy())
-    plt.title(f"{i} (temp): {model.seq[input_idx:final_idx+1](temp_input)[0].item()}")
+    plt.title(f"{i} (temp): {temp_model_outp}")
     plt.show()
 
     inp_weights = temp_input.detach().clone()
@@ -264,38 +273,56 @@ for i in tqdm(range(1, len(start_idxs))):
     min_lr = 1e-6
     max_lr = 5e-6
 
-    prev_output = optimize_input(
+    final_input = optimize_input(
         input_idx,
         final_idx,
         target=t.tensor([1.0], requires_grad=True, dtype=t.float32),
         inp_weights=inp_weights,
-        steps=5000,
+        steps=steps,
+        diversity_weight=0.0,
     )
 
-    plt.bar(range(prev_output.shape[-1]), prev_output[0].cpu().numpy())
-    plt.title(f"{i} (final): {model.seq[input_idx:final_idx+1](prev_output)[0].item()}")
+    model_outp = model.seq[input_idx : final_idx + 1](final_input)[0].item()
+    plt.bar(range(final_input.shape[-1]), final_input[0].cpu().numpy())
+    plt.title(f"{i} (final): {model_outp}")
     plt.show()
 
-print(model.seq[input_idx:](prev_output))
+    terminate = model_outp < 0 and temp_model_outp < -14
+
+    return temp_input, final_input, terminate
+
 
 # %%
 
-print(model.seq[input_idx : final_idx + 1](temp_input))
 
-# plt.bar(range(prev_output.shape[-1]), prev_output[0].cpu().numpy())
-# plt.show()
+# prev_output = final_output
+prev_output = mean_final_output
+
+
+def resume_from_layer(i):
+    print(f"Resuming from layer {i}")
+    global prev_output
+    temp_input, final_input = cache[i]
+    prev_output = final_input
+
+
+start_layer = 1
+if (start_layer - 1) in cache:
+    resume_from_layer(start_layer - 1)
+
+for i in tqdm(range(start_layer, len(start_idxs))):
+    temp_input, final_input, terminate = optimize_layer(prev_output, i, steps=10_000)
+    cache[i] = (temp_input, final_input)
+    prev_output = final_input
+
+    if terminate:
+        print(f"Terminated at layer {i}!")
+        break
 
 # %%
+prev_output_1 = cache[1][1]
+print(model.seq[start_idxs[1] : final_idx + 1](prev_output_1))
+# %%
 
-# i = 1
-# plt.bar(range(out2.shape[-1]), out2[i].cpu().numpy())
-# plt.show()
-
-# plt.bar(range(48), model.seq[5437:5440](out2 * 10)[i].detach().cpu().numpy())
-# plt.show()
-
-# plt.bar(range(48), model.seq[5437:5441](out2)[i].detach().cpu().numpy())
-# plt.show()
-
-# plt.bar(range(48), model.seq[5437:5440](out2)[0].detach().cpu().numpy())
-# plt.show()
+x = t.nn.functional.normalize(prev_output_1, p=2, dim=-1).cpu().numpy()
+plt.imshow(x @ x.T)
