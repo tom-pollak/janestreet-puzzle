@@ -1,3 +1,6 @@
+"""
+Gradient works, but because we're basically dealing with dead relus we get 0 gradient back to our input.
+"""
 # %%
 from textwrap import dedent
 
