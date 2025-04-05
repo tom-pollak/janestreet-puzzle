@@ -104,3 +104,5 @@ print(first_inp)
 print(first_acts)
 
 # %%
+
+third_last.weight.shape

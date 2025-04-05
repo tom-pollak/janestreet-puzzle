@@ -42,17 +42,6 @@ start_idxs.append(0)
 
 # %%
 
-min_lr = 1e-3
-max_lr = 5e-3
-break_loss = 1e-6
-eps_cossim = 5e-3
-cos_alpha = 0.0  # 1e-3
-weight_decay = 0.0  # 1e-3
-batch_size = 100
-max_grad_norm = 1.0
-diversity_weight = 0.1
-
-
 # %%
 def lr_scheduler(step, n_steps, warmup_steps, min_lr, max_lr):
     assert step < n_steps
@@ -149,70 +138,70 @@ def optimize_input(
 
 # %%
 
-# need weight decay for this one
-weight_decay = 1e-3
-target = t.tensor([1.0], requires_grad=True, dtype=t.float32)
-input_idx = start_idxs[0]
-output_idx = final_idx
-out = optimize_input(input_idx, output_idx, target, steps=250)
+# # need weight decay for this one
+# weight_decay = 1e-3
+# target = t.tensor([1.0], requires_grad=True, dtype=t.float32)
+# input_idx = start_idxs[0]
+# output_idx = final_idx
+# out = optimize_input(input_idx, output_idx, target, steps=250)
 
-# %%
+# # %%
 
-plt.bar(range(out.shape[-1]), out.mean(dim=0).cpu().numpy())
-plt.show()
+# plt.bar(range(out.shape[-1]), out.mean(dim=0).cpu().numpy())
+# plt.show()
 
-plt.bar(range(100), model.seq[5439:](out).detach().cpu().numpy().T[0])
-plt.show()
-
-
-# %%
-weight_decay = 1e-2  # 0.0
-output_idx = start_idxs[0] - 1
-input_idx = start_idxs[1]  # + 1
-target = out.mean(dim=0).detach()
-
-out2 = optimize_input(input_idx, output_idx, target, steps=10000, inp_stddev=1.0)
-# %%
-
-i = 1
-plt.bar(range(out2.shape[-1]), out2[i].cpu().numpy())
-plt.show()
-
-plt.bar(range(48), model.seq[5437:5440](out2 * 10)[i].detach().cpu().numpy())
-plt.show()
-
-plt.bar(range(48), model.seq[5437:5441](out2)[i].detach().cpu().numpy())
-plt.show()
-
-plt.bar(range(48), model.seq[5437:5440](out2)[0].detach().cpu().numpy())
-plt.show()
-
-# %%
-print(model.seq[5437:5441](out2[0]))
+# plt.bar(range(100), model.seq[5439:](out).detach().cpu().numpy().T[0])
+# plt.show()
 
 
-# %%
-min_lr = 1e-6
-max_lr = 5e-6
-weight_decay = 0.0
-max_grad_norm = 0.1
+# # %%
+# weight_decay = 1e-2  # 0.0
+# output_idx = start_idxs[0] - 1
+# input_idx = start_idxs[1]  # + 1
+# target = out.mean(dim=0).detach()
+
+# out2 = optimize_input(input_idx, output_idx, target, steps=10000, inp_stddev=1.0)
+# # %%
+
+# i = 1
+# plt.bar(range(out2.shape[-1]), out2[i].cpu().numpy())
+# plt.show()
+
+# plt.bar(range(48), model.seq[5437:5440](out2 * 10)[i].detach().cpu().numpy())
+# plt.show()
+
+# plt.bar(range(48), model.seq[5437:5441](out2)[i].detach().cpu().numpy())
+# plt.show()
+
+# plt.bar(range(48), model.seq[5437:5440](out2)[0].detach().cpu().numpy())
+# plt.show()
+
+# # %%
+# print(model.seq[5437:5441](out2[0]))
 
 
-inp_weights = out2.detach().clone()
-inp_weights.requires_grad = True
+# # %%
+# min_lr = 1e-6
+# max_lr = 5e-6
+# weight_decay = 0.0
+# max_grad_norm = 0.1
 
-out3 = optimize_input(
-    input_idx,
-    final_idx,
-    target=t.tensor([1.0], requires_grad=True, dtype=t.float32),
-    inp_weights=inp_weights,
-    steps=5000,
-)
 
-plt.bar(range(out3.shape[-1]), out3[i].cpu().numpy())
-plt.show()
+# inp_weights = out2.detach().clone()
+# inp_weights.requires_grad = True
 
-print(model.seq[5437:5441](out3[0]))
+# out3 = optimize_input(
+#     input_idx,
+#     final_idx,
+#     target=t.tensor([1.0], requires_grad=True, dtype=t.float32),
+#     inp_weights=inp_weights,
+#     steps=5000,
+# )
+
+# plt.bar(range(out3.shape[-1]), out3[i].cpu().numpy())
+# plt.show()
+
+# print(model.seq[5437:5441](out3[0]))
 
 # %%
 
@@ -220,23 +209,23 @@ print(model.seq[5437:5441](out3[0]))
 # ████████████████████████████████  Do The Thing  ████████████████████████████████
 
 
+batch_size = 100
 min_lr = 1e-3
 max_lr = 5e-3
 break_loss = 1e-8
 weight_decay = 1e-3
 max_grad_norm = 1.0
-diversity_weight = 1e-8
+diversity_weight = 0.0 # 1e-10
 
 # %%
 
 # I think for the first layer, we need a batch to mean out all the different possible ways of getting a 1.0
 # we can actually remove batch_size after this
-batch_size = 100
 
 target = t.tensor([1.0], requires_grad=True, dtype=t.float32)
 input_idx = start_idxs[0]
 output_idx = final_idx
-final_output = optimize_input(input_idx, output_idx, target, steps=10000)
+final_output = optimize_input(input_idx, output_idx, target, steps=10000, diversity_weight=1e-6)
 
 mean_final_output = final_output.mean(dim=0).detach()
 
@@ -255,16 +244,24 @@ def optimize_layer(prev_output, i, steps):
 
     min_lr = 1e-3
     max_lr = 5e-3
-    output_idx = start_idxs[i - 1] - 1  # off the relu
+    output_idx = start_idxs[i - 1] # - 1  # off the relu
     input_idx = start_idxs[i]  # on the relu
 
     # this gets us to an ok point in input space to start our optimization, so we actually get a gradient.
-    temp_input = optimize_input(input_idx, output_idx, prev_output, steps=steps, diversity_weight=diversity_weight)
+    temp_input = optimize_input(
+        input_idx,
+        output_idx,
+        prev_output,
+        steps=steps,
+        diversity_weight=diversity_weight,
+    )
 
-    temp_model_outp = model.seq[input_idx : final_idx + 1](temp_input)[0].item()
+    temp_model_outp = model.seq[input_idx : final_idx + 1](temp_input)
+    best_temp_output_idx = temp_model_outp.argmax()
+    best_temp_output = temp_model_outp[best_temp_output_idx].item()
 
-    plt.bar(range(temp_input.shape[-1]), temp_input[0].cpu().numpy())
-    plt.title(f"{i} (temp): {temp_model_outp}")
+    plt.bar(range(temp_input.shape[-1]), temp_input[best_temp_output_idx].cpu().numpy())
+    plt.title(f"{i} (temp): {best_temp_output}")
     plt.show()
 
     inp_weights = temp_input.detach().clone()
@@ -282,12 +279,15 @@ def optimize_layer(prev_output, i, steps):
         diversity_weight=0.0,
     )
 
-    model_outp = model.seq[input_idx : final_idx + 1](final_input)[0].item()
-    plt.bar(range(final_input.shape[-1]), final_input[0].cpu().numpy())
-    plt.title(f"{i} (final): {model_outp}")
+    model_outp = model.seq[input_idx : final_idx + 1](final_input)
+    best_output_idx = model_outp.argmax()
+    best_output = model_outp[best_output_idx].item()
+
+    plt.bar(range(final_input.shape[-1]), final_input[best_output_idx].cpu().numpy())
+    plt.title(f"{i} (final): {best_output}")
     plt.show()
 
-    terminate = model_outp < 0 and temp_model_outp < -14
+    terminate = best_output < 0
 
     return temp_input, final_input, terminate
 
@@ -295,8 +295,8 @@ def optimize_layer(prev_output, i, steps):
 # %%
 
 
-# prev_output = final_output
-prev_output = mean_final_output
+prev_output = final_output
+# prev_output = mean_final_output
 
 
 def resume_from_layer(i):
@@ -309,11 +309,16 @@ def resume_from_layer(i):
 start_layer = 1
 if (start_layer - 1) in cache:
     resume_from_layer(start_layer - 1)
+else:
+    assert start_layer == 1, f"{start_layer} is not in cache"
+
 
 for i in tqdm(range(start_layer, len(start_idxs))):
-    temp_input, final_input, terminate = optimize_layer(prev_output, i, steps=10_000)
+    temp_input, final_input, terminate = optimize_layer(t.nn.functional.relu(prev_output), i, steps=10_000)
     cache[i] = (temp_input, final_input)
     prev_output = final_input
+    # could also try to mean the final_input together to get the best?
+    # no exploration this way though
 
     if terminate:
         print(f"Terminated at layer {i}!")
@@ -321,8 +326,37 @@ for i in tqdm(range(start_layer, len(start_idxs))):
 
 # %%
 prev_output_1 = cache[1][1]
-print(model.seq[start_idxs[1] : final_idx + 1](prev_output_1))
+a = model.seq[start_idxs[1] : final_idx + 1](prev_output_1)
+a.argmax()
 # %%
 
 x = t.nn.functional.normalize(prev_output_1, p=2, dim=-1).cpu().numpy()
 plt.imshow(x @ x.T)
+
+# %%
+third_last = model.seq[5436]
+
+plt.imshow(third_last.weight.data.cpu().numpy())
+plt.show()
+plt.bar(range(third_last.bias.data.shape[-1]), third_last.bias.data.cpu().numpy())
+plt.show()
+
+# %%
+
+a = t.zeros(320, dtype=t.float32, device=device)
+# a[t.arange(25)] = 1.
+a[t.from_numpy(idxs)] = 1.
+third_last = third_last.to(device)
+out = third_last(a).cpu().detach().numpy()
+plt.bar(range(out.shape[-1]), out)
+plt.show()
+
+# %%
+
+
+
+import numpy as np
+
+idxs = np.argwhere(third_last.weight.data.cpu().numpy() > 0)
+third_last.weight.data.cpu().numpy()[idxs[:, 0], idxs[:, 1]]
+# %%
