@@ -44,7 +44,7 @@ max_lr = 5e-3
 eps_mse = 1e-6
 eps_cossim = 5e-3
 cos_alpha = 0.0  # 1e-3
-weight_decay = 0.
+weight_decay = 0.0 # 1e-3
 batch_size = 100
 # %%
 
@@ -101,13 +101,13 @@ def optimize_input(
         with sight.trace(rand_toks) as tracer:
             sight.seq[input_idx].input = inp
             acts = sight.seq[output_idx].output.save()
-            diff_loss = t.nn.functional.mse_loss(acts, target)
-            # if target.shape == (batch_size, 1):
-            #     diff_loss = t.nn.functional.mse_loss(acts, target)
-            # else:
-            #     diff_loss = t.nn.functional.cosine_embedding_loss(
-            #         acts, target, target=t.ones(batch_size)
-            #     )
+            # diff_loss = t.nn.functional.mse_loss(acts, target)
+            if target.shape == (batch_size, 1):
+                diff_loss = t.nn.functional.mse_loss(acts, target)
+            else:
+                diff_loss = t.nn.functional.cosine_embedding_loss(
+                    acts, target, target=t.ones(batch_size)
+                )
             diff_loss.save()
 
         # print(acts.shape, target.shape)
@@ -157,7 +157,7 @@ output_idx = start_idxs[0] - 1
 input_idx = start_idxs[1] + 1
 target = out.mean(dim=0).detach()
 
-out2 = optimize_input(input_idx, output_idx, target, min_steps=100, max_steps=1000)
+out2 = optimize_input(input_idx, output_idx, target, min_steps=100, max_steps=250)
 
 # %%
 
