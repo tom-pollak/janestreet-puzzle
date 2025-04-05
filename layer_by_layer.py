@@ -1,5 +1,6 @@
 # %%
 
+import matplotlib.pyplot as plt
 import torch as t
 from huggingface_hub import hf_hub_download
 from nnsight import NNsight
@@ -41,12 +42,14 @@ start_idxs.append(0)
 
 min_lr = 1e-3
 max_lr = 5e-3
-eps_mse = 1e-6
+break_loss = 1e-6
 eps_cossim = 5e-3
 cos_alpha = 0.0  # 1e-3
 weight_decay = 0.0  # 1e-3
 batch_size = 100
-max_grad_norm = 1.
+max_grad_norm = 1.0
+
+
 # %%
 def lr_scheduler(step, n_steps, warmup_steps, min_lr, max_lr):
     assert step < n_steps
@@ -69,6 +72,7 @@ def optimize_input(
     inp_weights=None,
     steps=1000,
     inp_stddev=1.0,
+    close_pbar=True,
 ):
     input_layer = model.seq[input_idx]
     if not hasattr(input_layer, "out_features"):  # isinstance(input_layer, t.nn.ReLU):
@@ -111,10 +115,11 @@ def optimize_input(
         acts = sub_model(inp)
         loss = t.nn.functional.mse_loss(acts, target)
 
-        zinp = t.nn.functional.normalize(inp, p=2, dim=-1)
-        bottom_tri = t.tril(t.ones_like(zinp @ zinp.T), diagonal=-1)
-        cossim = (zinp @ zinp.T) * bottom_tri
-        cossim_loss = t.nn.functional.mse_loss(cossim, bottom_tri)
+        # zinp = t.nn.functional.normalize(inp, p=2, dim=-1)
+        # bottom_tri = t.tril(t.ones_like(zinp @ zinp.T), diagonal=-1)
+        # cossim = (zinp @ zinp.T) * bottom_tri
+        # cossim_loss = t.nn.functional.mse_loss(cossim, bottom_tri)
+
 
         loss.backward()
         grad_norm = t.nn.utils.clip_grad_norm_(inp, max_norm=max_grad_norm)
@@ -127,10 +132,11 @@ def optimize_input(
                 cossim_loss=cossim_loss.item(),
             )
 
-        if loss < eps_mse and i > steps // 10:
+        if loss < break_loss and i > steps // 10:
             break
 
-    # pbar.close()
+    if close_pbar:
+        pbar.close()
     return inp.detach()
 
 
@@ -144,7 +150,6 @@ output_idx = final_idx
 out = optimize_input(input_idx, output_idx, target, steps=250)
 
 # %%
-import matplotlib.pyplot as plt
 
 plt.bar(range(out.shape[-1]), out.mean(dim=0).cpu().numpy())
 plt.show()
@@ -154,14 +159,12 @@ plt.show()
 
 
 # %%
-weight_decay = 1e-2 # 0.0
+weight_decay = 1e-2  # 0.0
 output_idx = start_idxs[0] - 1
-input_idx = start_idxs[1] # + 1
+input_idx = start_idxs[1]  # + 1
 target = out.mean(dim=0).detach()
 
-out2 = optimize_input(
-    input_idx, output_idx, target, steps=10000, inp_stddev=1.
-)
+out2 = optimize_input(input_idx, output_idx, target, steps=10000, inp_stddev=1.0)
 # %%
 
 i = 1
@@ -170,9 +173,6 @@ plt.show()
 
 plt.bar(range(48), model.seq[5437:5440](out2 * 10)[i].detach().cpu().numpy())
 plt.show()
-
-# plt.bar(range(out.shape[-1]), out[i].cpu().numpy())
-# plt.show()
 
 plt.bar(range(48), model.seq[5437:5441](out2)[i].detach().cpu().numpy())
 plt.show()
@@ -187,7 +187,7 @@ print(model.seq[5437:5441](out2[0]))
 # %%
 min_lr = 1e-6
 max_lr = 5e-6
-weight_decay = 0.
+weight_decay = 0.0
 max_grad_norm = 0.1
 
 
@@ -208,3 +208,94 @@ plt.show()
 print(model.seq[5437:5441](out3[0]))
 
 # %%
+
+
+# ████████████████████████████████  Do The Thing  ████████████████████████████████
+
+
+min_lr = 1e-3
+max_lr = 5e-3
+break_loss = 1e-8
+weight_decay = 1e-3
+max_grad_norm = 1.0
+
+# %%
+
+# I think for the first layer, we need a batch to mean out all the different possible ways of getting a 1.0
+# we can actually remove batch_size after this
+batch_size = 100
+
+target = t.tensor([1.0], requires_grad=True, dtype=t.float32)
+input_idx = start_idxs[0]
+output_idx = final_idx
+out = optimize_input(input_idx, output_idx, target, steps=5000)
+
+final_output = out.mean(dim=0).detach()
+
+plt.bar(range(out.shape[-1]), final_output.cpu().numpy())
+plt.title(
+    f"Final layer optimization {model.seq[5439:](final_output).detach().cpu().numpy()}",
+)
+plt.show()
+
+# %%
+
+prev_output = final_output
+
+# ok let's focus only on a single example.
+batch_size = 100
+
+for i in tqdm(range(1, len(start_idxs))):
+    min_lr = 1e-3
+    max_lr = 5e-3
+    output_idx = start_idxs[i - 1] - 1  # off the relu
+    input_idx = start_idxs[i]  # on the relu
+
+    # this gets us to an ok point in input space to start our optimization, so we actually get a gradient.
+    temp_input = optimize_input(input_idx, output_idx, prev_output, steps=5000)
+
+    plt.bar(range(temp_input.shape[-1]), temp_input[0].cpu().numpy())
+    plt.title(f"{i} (temp): {model.seq[input_idx:final_idx+1](temp_input)[0].item()}")
+    plt.show()
+
+    inp_weights = temp_input.detach().clone()
+    inp_weights.requires_grad = True
+
+    min_lr = 1e-6
+    max_lr = 5e-6
+
+    prev_output = optimize_input(
+        input_idx,
+        final_idx,
+        target=t.tensor([1.0], requires_grad=True, dtype=t.float32),
+        inp_weights=inp_weights,
+        steps=5000,
+    )
+
+    plt.bar(range(prev_output.shape[-1]), prev_output[0].cpu().numpy())
+    plt.title(f"{i} (final): {model.seq[input_idx:final_idx+1](prev_output)[0].item()}")
+    plt.show()
+
+print(model.seq[input_idx:](prev_output))
+
+# %%
+
+print(model.seq[input_idx : final_idx + 1](temp_input))
+
+# plt.bar(range(prev_output.shape[-1]), prev_output[0].cpu().numpy())
+# plt.show()
+
+# %%
+
+# i = 1
+# plt.bar(range(out2.shape[-1]), out2[i].cpu().numpy())
+# plt.show()
+
+# plt.bar(range(48), model.seq[5437:5440](out2 * 10)[i].detach().cpu().numpy())
+# plt.show()
+
+# plt.bar(range(48), model.seq[5437:5441](out2)[i].detach().cpu().numpy())
+# plt.show()
+
+# plt.bar(range(48), model.seq[5437:5440](out2)[0].detach().cpu().numpy())
+# plt.show()
