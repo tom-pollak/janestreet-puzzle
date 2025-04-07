@@ -1,6 +1,7 @@
 # %%
 
 import matplotlib.pyplot as plt
+import numpy as np
 import torch as t
 from huggingface_hub import hf_hub_download
 from nnsight import NNsight
@@ -40,7 +41,6 @@ start_idxs = [i for i, l in enumerate(model.seq) if isinstance(l, t.nn.ReLU)][::
 final_idx = start_idxs.pop(0) - 1  # final linear layer -- optimize to be 1.0
 start_idxs.append(0)
 
-# %%
 
 # %%
 def lr_scheduler(step, n_steps, warmup_steps, min_lr, max_lr):
@@ -78,17 +78,12 @@ def optimize_input(
             t.randn(batch_size, inp_dim, requires_grad=True, dtype=t.float32)
             * inp_stddev
         )
-        # layer_W = model.seq[input_idx + 1].weight.data
-        # layer_b = model.seq[input_idx + 1].bias.data
-        # layer_W_norm = (layer_W.max() - layer_W.min()) / 2
-        # layer_W.div_(layer_W_norm)
-        # layer_b.div_(layer_W_norm)
 
     else:
         assert inp_weights.shape == (
             batch_size,
             inp_dim,
-        )
+        ), f"wanted {(batch_size, inp_dim)}, given {inp_weights.shape}"
         inp_weights.requires_grad = True
         inp_weights.grad = None
 
@@ -106,7 +101,21 @@ def optimize_input(
         optimizer.zero_grad()
         sub_model = model.seq[input_idx : output_idx + 1]
         acts = sub_model(inp)
-        mse_loss = t.nn.functional.mse_loss(acts, target)
+        # mse_loss = t.nn.functional.mse_loss(acts, target)
+        euclidean_loss = t.nn.functional.pairwise_distance(acts, target).mean()
+        euclidean_loss = euclidean_loss * euclidean_weight
+
+        # Calculate the cosine embedding loss using the functional interface
+        cosine_loss = t.nn.functional.cosine_embedding_loss(
+            acts,
+            target,
+            target=t.ones(acts.shape[0], device=acts.device),
+            margin=0.0,
+            reduction="mean",
+        )
+        cosine_loss = cosine_loss * cosine_weight
+
+        dist_loss = euclidean_loss + cosine_loss
 
         normalized_inp = t.nn.functional.normalize(inp, p=2, dim=-1)
         cosine_sim = normalized_inp @ normalized_inp.T
@@ -114,7 +123,7 @@ def optimize_input(
         # mean cosine similarity between different inputs
         cossim_loss = (cosine_sim * mask).sum() / (mask.sum() + 1e-8)
 
-        loss = mse_loss + diversity_weight * cossim_loss
+        loss = dist_loss + diversity_weight * cossim_loss
 
         loss.backward()
         grad_norm = t.nn.utils.clip_grad_norm_(inp, max_norm=max_grad_norm)
@@ -123,7 +132,8 @@ def optimize_input(
         if i % 250 == 0:
             pbar.set_postfix(
                 loss=loss.item(),
-                mse_loss=mse_loss.item(),
+                euclidean_loss=euclidean_loss.item(),
+                cosine_loss=cosine_loss.item(),
                 cossim_loss=cossim_loss.item(),
                 grad_norm=grad_norm.item(),
             )
@@ -215,7 +225,9 @@ max_lr = 5e-3
 break_loss = 1e-8
 weight_decay = 1e-3
 max_grad_norm = 1.0
-diversity_weight = 0.0 # 1e-10
+diversity_weight = 0.0  # 1e-10
+euclidean_weight = 1.0
+cosine_weight = 0.0
 
 # %%
 
@@ -225,7 +237,9 @@ diversity_weight = 0.0 # 1e-10
 target = t.tensor([1.0], requires_grad=True, dtype=t.float32)
 input_idx = start_idxs[0]
 output_idx = final_idx
-final_output = optimize_input(input_idx, output_idx, target, steps=10000, diversity_weight=1e-6)
+final_output = optimize_input(
+    input_idx, output_idx, target, steps=10000, diversity_weight=1e-6
+)
 
 mean_final_output = final_output.mean(dim=0).detach()
 
@@ -236,7 +250,32 @@ plt.title(
 )
 plt.show()
 
+
 # %%
+
+
+def plot_layer(inp, input_idx, output_idx, final_idx, title):
+    assert inp.ndim == 1
+    inp = inp.unsqueeze(0)
+
+    fig, (ax1, ax2) = plt.subplots(ncols=2, figsize=(10, 5))
+
+    to_final_layer = model.seq[input_idx : final_idx + 1]
+    final_layer_outp = to_final_layer(inp).detach().item()
+
+    fig.suptitle(f"{title} -- {final_layer_outp:.3f}")
+
+    ax1.set_title("Features")
+    ax1.bar(range(inp.shape[-1]), inp.cpu().numpy()[0])
+
+    next_layer = model.seq[input_idx : output_idx + 1]
+    next_layer_outp = next_layer(inp)[0].detach().cpu().numpy()
+
+    print(next_layer_outp.shape)
+    ax2.set_title("Map to next layer")
+    ax2.bar(range(next_layer_outp.shape[-1]), next_layer_outp)
+
+    plt.show()
 
 
 def optimize_layer(prev_output, i, steps):
@@ -244,8 +283,10 @@ def optimize_layer(prev_output, i, steps):
 
     min_lr = 1e-3
     max_lr = 5e-3
-    output_idx = start_idxs[i - 1] # - 1  # off the relu
-    input_idx = start_idxs[i]  # on the relu
+    output_idx = (
+        start_idxs[i - 1] - 1
+    )  # off the relu because we don't want to kill signal
+    input_idx = start_idxs[i] # + 1 ### off the relu again # on the relu
 
     # this gets us to an ok point in input space to start our optimization, so we actually get a gradient.
     temp_input = optimize_input(
@@ -258,11 +299,14 @@ def optimize_layer(prev_output, i, steps):
 
     temp_model_outp = model.seq[input_idx : final_idx + 1](temp_input)
     best_temp_output_idx = temp_model_outp.argmax()
-    best_temp_output = temp_model_outp[best_temp_output_idx].item()
 
-    plt.bar(range(temp_input.shape[-1]), temp_input[best_temp_output_idx].cpu().numpy())
-    plt.title(f"{i} (temp): {best_temp_output}")
-    plt.show()
+    plot_layer(
+        temp_input[best_temp_output_idx],
+        input_idx,
+        output_idx,
+        final_idx,
+        f"{i} (temp)",
+    )
 
     inp_weights = temp_input.detach().clone()
     inp_weights.requires_grad = True
@@ -283,9 +327,13 @@ def optimize_layer(prev_output, i, steps):
     best_output_idx = model_outp.argmax()
     best_output = model_outp[best_output_idx].item()
 
-    plt.bar(range(final_input.shape[-1]), final_input[best_output_idx].cpu().numpy())
-    plt.title(f"{i} (final): {best_output}")
-    plt.show()
+    plot_layer(
+        final_input[best_output_idx],
+        input_idx,
+        final_idx,
+        final_idx,
+        title=f"{i} (final)",
+    )
 
     terminate = best_output < 0
 
@@ -295,15 +343,20 @@ def optimize_layer(prev_output, i, steps):
 # %%
 
 
-prev_output = final_output
-# prev_output = mean_final_output
+# prev_output = final_output
+prev_output = mean_final_output
+# prev_output = a
+# batch_size = a.shape[0]
 
+# batch_size = prev_output.shape[0]
+batch_size = 512
 
 def resume_from_layer(i):
     print(f"Resuming from layer {i}")
     global prev_output
     temp_input, final_input = cache[i]
     prev_output = final_input
+    # prev_output = temp_input
 
 
 start_layer = 1
@@ -314,9 +367,13 @@ else:
 
 
 for i in tqdm(range(start_layer, len(start_idxs))):
-    temp_input, final_input, terminate = optimize_layer(t.nn.functional.relu(prev_output), i, steps=10_000)
+    p = t.nn.functional.relu(prev_output)
+    temp_input, final_input, terminate = optimize_layer(
+        p, i, steps=10000
+    )
     cache[i] = (temp_input, final_input)
     prev_output = final_input
+    # prev_output = temp_input
     # could also try to mean the final_input together to get the best?
     # no exploration this way though
 
@@ -325,38 +382,124 @@ for i in tqdm(range(start_layer, len(start_idxs))):
         break
 
 # %%
-prev_output_1 = cache[1][1]
-a = model.seq[start_idxs[1] : final_idx + 1](prev_output_1)
-a.argmax()
-# %%
 
-x = t.nn.functional.normalize(prev_output_1, p=2, dim=-1).cpu().numpy()
-plt.imshow(x @ x.T)
+batch_size = 512
+end = model.seq[start_idxs[2] : final_idx + 1]
 
-# %%
-third_last = model.seq[5436]
+n_tries = 10_000_000
+inps = []
+acts = []
+for _ in tqdm(range(n_tries // batch_size)):
+    with t.no_grad():
+        b_inps = t.randn(batch_size, 320)
+        b_acts = end(b_inps)
+        inps.append(b_inps.cpu())
+        acts.append(b_acts.cpu())
 
-plt.imshow(third_last.weight.data.cpu().numpy())
-plt.show()
-plt.bar(range(third_last.bias.data.shape[-1]), third_last.bias.data.cpu().numpy())
-plt.show()
-
-# %%
-
-a = t.zeros(320, dtype=t.float32, device=device)
-# a[t.arange(25)] = 1.
-a[t.from_numpy(idxs)] = 1.
-third_last = third_last.to(device)
-out = third_last(a).cpu().detach().numpy()
-plt.bar(range(out.shape[-1]), out)
-plt.show()
+inps = t.cat(inps, dim=0)
+acts = t.cat(acts, dim=0)
+inps.shape, acts.shape
 
 # %%
 
+values, indices = acts.squeeze().topk(512)
+best_acts = acts[indices]
 
+best_inps = inps[indices]
+values
 
-import numpy as np
-
-idxs = np.argwhere(third_last.weight.data.cpu().numpy() > 0)
-third_last.weight.data.cpu().numpy()[idxs[:, 0], idxs[:, 1]]
 # %%
+
+inp_weights = best_inps.detach().clone()
+inp_weights = inp_weights.to(device)
+inp_weights.requires_grad = True
+
+min_lr = 1e-6
+max_lr = 5e-6
+
+input_idx = start_idxs[2]
+
+final_input = optimize_input(
+    input_idx,
+    final_idx,
+    target=t.tensor([1.0], requires_grad=True, dtype=t.float32),
+    inp_weights=inp_weights,
+    steps=10_000,
+    diversity_weight=0.0,
+)
+
+model_outp = model.seq[input_idx : final_idx + 1](final_input)
+best_output_idx = model_outp.argmax()
+best_output = model_outp[best_output_idx].item()
+
+plot_layer(
+    final_input[best_output_idx],
+    input_idx,
+    final_idx,
+    final_idx,
+    title=f"adf",
+)
+
+
+# %%
+
+
+# prev_output_1 = cache[1][1]
+# a = model.seq[start_idxs[1] : final_idx + 1](prev_output_1)
+# a
+# # %%
+#
+# x = t.nn.functional.normalize(prev_output_1, p=2, dim=-1).cpu().numpy()
+# plt.imshow(x @ x.T)
+#
+# # %%
+# third_last = model.seq[5436]
+#
+# plt.imshow(third_last.weight.data.cpu().numpy())
+# plt.show()
+# plt.bar(range(third_last.bias.data.shape[-1]), third_last.bias.data.cpu().numpy())
+# plt.show()
+#
+# # %%
+#
+# a = t.zeros(320, dtype=t.float32, device=device)
+# # a[t.arange(25)] = 1.
+# a[t.from_numpy(idxs)] = 1.0
+# third_last = third_last.to(device)
+# out = third_last(a).cpu().detach().numpy()
+# plt.bar(range(out.shape[-1]), out)
+# plt.show()
+#
+# # %%
+#
+#
+#
+#
+# idxs = np.argwhere(third_last.weight.data.cpu().numpy() > 0)
+# third_last.weight.data.cpu().numpy()[idxs[:, 0], idxs[:, 1]]
+# # %%
+#
+# plt.imshow(last.weight.data.cpu().numpy())
+# plt.show()
+# plt.bar(range(last.bias.data.shape[-1]), last.bias.data.cpu().numpy())
+# plt.show()
+#
+# # %%
+#
+#
+# # %%
+# last = model.seq[5440]
+# w = last.weight.data
+# idxs = (w > 0).argwhere()[:, 1]
+# a = t.zeros(idxs.shape[0], 48).to(device)
+# a[t.arange(idxs.shape[0]), idxs] = 16.0
+# plt.imshow(a.cpu().numpy())
+# plt.show()
+#
+# # %%
+#
+# model.seq[0].weight.data
+#
+#
+# # %%
+#
